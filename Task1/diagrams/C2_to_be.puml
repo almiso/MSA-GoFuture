@@ -1,0 +1,129 @@
+@startuml C2_to_be
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Диаграмма контейнеров (C2) - Целевая архитектура GoFuture
+
+Person(passenger, "Пассажир", "iOS/Android")
+Person(driver, "Водитель", "iOS/Android")
+Person(manager, "Менеджер", "Web")
+Person(accountant, "Бухгалтер", "Web")
+
+System_Ext(yandex_maps, "Yandex Maps", "API Маршрутизации")
+System_Ext(yandex_pay, "Yandex Pay", "Платёжный шлюз")
+System_Ext(bank_api, "Bank API", "Шлюз выплат")
+System_Ext(push_provider, "Push Providers", "FCM/APNs")
+
+System_Boundary(gofuture, "GoFuture (To-Be)") {
+    Container(api_gateway, "API Gateway", "Nginx", "Маршрутизация (Strangler Fig)")
+
+    ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Асинхронные бизнес-события")
+
+    System_Boundary(legacy, "Legacy") {
+        Container(legacy_monolith, "Legacy Monolith", "Django", "Постепенно распиливается")
+        ContainerDb(legacy_db, "Legacy DB", "PostgreSQL", "Общая база")
+    }
+
+    System_Boundary(geography, "Geography") {
+        Container(geography_svc, "Geography Service", "Go")
+        ContainerDb(geography_db, "Geo DB", "PostgreSQL/PostGIS")
+        ContainerDb(geography_redis, "Geo Cache", "Redis")
+    }
+
+    System_Boundary(pricing, "Pricing") {
+        Container(pricing_svc, "Pricing Service", "Go")
+        ContainerDb(pricing_db, "Pricing DB", "PostgreSQL")
+        ContainerDb(pricing_redis, "Pricing Cache", "Redis")
+    }
+
+    System_Boundary(booking, "Booking") {
+        Container(booking_svc, "Booking Service", "Go", "Оркестратор Саги")
+        ContainerDb(booking_db, "Booking DB", "PostgreSQL")
+    }
+
+    System_Boundary(driver_domain, "Driver") {
+        Container(driver_svc, "Driver Service", "Go")
+        ContainerDb(driver_db, "Driver DB", "PostgreSQL")
+        ContainerDb(driver_es, "Geo Search", "Elasticsearch")
+    }
+
+    System_Boundary(payments, "Payments") {
+        Container(payments_svc, "Payments Service", "Go")
+        ContainerDb(payments_db, "Payments DB", "PostgreSQL (PCI DSS)")
+    }
+
+    System_Boundary(payouts, "Payouts") {
+        Container(payouts_svc, "Payouts Service", "Go")
+        ContainerDb(payouts_db, "Payouts DB", "PostgreSQL")
+    }
+
+    System_Boundary(fraud, "Fraud") {
+        Container(fraud_svc, "Fraud Service", "Python")
+        ContainerDb(fraud_db, "Fraud DB", "PostgreSQL")
+    }
+
+    System_Boundary(notifications, "Notification") {
+        Container(notification_svc, "Notification Service", "Go")
+        ContainerDb(notification_db, "Notification DB", "PostgreSQL")
+    }
+
+    System_Boundary(analytics, "Analytics") {
+        Container(analytics_svc, "Analytics Service", "Python")
+        ContainerDb(analytics_db, "Analytics DB", "ClickHouse")
+    }
+}
+
+Rel(passenger, api_gateway, "HTTPS")
+Rel(driver, api_gateway, "HTTPS")
+Rel(manager, api_gateway, "HTTPS")
+Rel(accountant, api_gateway, "HTTPS")
+
+Rel_D(api_gateway, legacy_monolith, "HTTP", "Остальной трафик")
+Rel_D(api_gateway, geography_svc, "HTTP", "/api/v1/geo")
+Rel_D(api_gateway, pricing_svc, "HTTP", "/api/v1/pricing")
+Rel_D(api_gateway, fraud_svc, "HTTP", "/api/v1/fraud")
+Rel_D(api_gateway, driver_svc, "HTTP", "/api/v1/driver")
+Rel_D(api_gateway, payments_svc, "HTTP", "/api/v1/payments")
+Rel_D(api_gateway, payouts_svc, "HTTP", "/api/v1/payouts")
+Rel_D(api_gateway, booking_svc, "HTTP", "/api/v1/booking")
+Rel_D(api_gateway, notification_svc, "HTTP", "/api/v1/notifications")
+Rel_D(api_gateway, analytics_svc, "HTTP", "/api/v1/analytics")
+
+Rel_R(legacy_monolith, legacy_db, "SQL")
+Rel_R(geography_svc, geography_db, "SQL")
+Rel_R(geography_svc, geography_redis, "TCP")
+Rel_R(pricing_svc, pricing_db, "SQL")
+Rel_R(pricing_svc, pricing_redis, "TCP")
+Rel_R(fraud_svc, fraud_db, "SQL")
+Rel_R(driver_svc, driver_db, "SQL")
+Rel_R(driver_svc, driver_es, "TCP")
+Rel_R(payments_svc, payments_db, "SQL")
+Rel_R(payouts_svc, payouts_db, "SQL")
+Rel_R(booking_svc, booking_db, "SQL")
+Rel_R(notification_svc, notification_db, "SQL")
+Rel_D(analytics_svc, analytics_db, "SQL")
+
+Rel(geography_svc, yandex_maps, "REST")
+Rel(payments_svc, yandex_pay, "REST")
+Rel(payouts_svc, bank_api, "REST")
+Rel(notification_svc, push_provider, "REST")
+
+' Sync dependencies (minimal paths)
+Rel_D(booking_svc, pricing_svc, "REST (Sync)")
+Rel_D(booking_svc, geography_svc, "REST (Sync)")
+Rel_D(payments_svc, fraud_svc, "REST (Sync)")
+
+' Async dependencies
+Rel_D(legacy_monolith, kafka, "Pub/Sub")
+Rel_D(booking_svc, kafka, "Pub/Sub")
+Rel_D(driver_svc, kafka, "Pub/Sub")
+Rel_D(pricing_svc, kafka, "Pub/Sub")
+Rel_D(geography_svc, kafka, "Pub/Sub")
+Rel_D(payments_svc, kafka, "Pub/Sub")
+Rel_D(payouts_svc, kafka, "Pub/Sub")
+Rel_D(fraud_svc, kafka, "Pub/Sub")
+Rel_D(analytics_svc, kafka, "Pub/Sub")
+Rel_D(notification_svc, kafka, "Sub")
+
+@enduml
