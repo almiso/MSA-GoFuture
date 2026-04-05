@@ -1,0 +1,62 @@
+@startuml ML_DATA_C2
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Диаграмма потоков данных (C2): Microservices -> Data Lake -> ML & BI Platform
+
+System_Boundary(operational, "Слой Транзакций (Operational Microservices)") {
+    Container(booking_svc, "Booking Service", "Go", "Создает бизнес-данные (Поездки)")
+    Container(driver_svc, "Driver Service", "Go", "Генерит поток телеметрии (Location)")
+    ContainerDb(micro_dbs, "Operational DBs", "PostgreSQL", "Локальные БД микросервисов")
+    
+    Rel(booking_svc, micro_dbs, "Пишет стейт")
+    Rel(driver_svc, micro_dbs, "Пишет стейт")
+}
+
+System_Boundary(ingestion, "Слой Сбора и Транспорта (Data Ingestion)") {
+    Container(cdc, "Debezium Connect (CDC)", "Kafka Connect", "Бесшовная выгрузка через Transactional Outbox")
+    ContainerQueue(kafka, "Apache Kafka", "Message Broker", "Центральная транспортная шина (Raw Events)")
+    Container(schema_registry, "Schema Registry", "Confluent", "Data Quality: Строгий контроль форматов JSON/Avro")
+    
+    Rel_U(kafka, schema_registry, "Валидация типов (Блокировка сломанных событий)")
+}
+
+System_Boundary(data_lake, "Уровень Хранения (Storage Layer)") {
+    ContainerDb(s3_datalake, "Data Lake", "Amazon S3", "Сырые исторические данные в форматах Parquet/Iceberg (Петабайты)")
+    ContainerDb(clickhouse, "Data Warehouse (DWH)", "ClickHouse", "Колоночная база. Агрегированные очищенные Data Marts")
+    
+    Container(great_expectations, "Data Quality Framework", "Great Expectations", "DQ: Ежедневная Batch проверка консистентности (Нет дублей, нет Null)")
+}
+
+System_Boundary(processing, "Обработка и Машинное Обучение (Compute & ML Layer)") {
+    Container(flink, "Apache Flink", "Stream Processor", "Real-Time: Расчет Surge-цен, фильтрация аномалий GPS (DQ Filter)")
+    Container(spark, "Apache Spark", "Batch Analytics", "Пакетные трансформации ETL: Из S3 Data Lake в ClickHouse")
+    
+    Container(ml_platform, "ML Training Platform", "Jupyter / PyTorch (SageMaker)", "Тренировка моделей (Surge, Фрод) на глубокой истории из Озера")
+    Container(model_serving, "Model Serving API", "MLFlow / FastAPI", "Микросервисы ML моделей для интеграции с Бекэндом (Inference)")
+}
+
+System_Boundary(bi_layer, "Business Intelligence (BI)") {
+    Container(superset, "BI & Analytics Dashboards", "Apache Superset / Tableau", "Визуальная аналитика для продуктовых менеджеров (SQL Query)")
+}
+
+
+' Data Flow
+Rel_R(micro_dbs, cdc, "Извлечение из WAL (Extract Без нагрузки)")
+Rel_D(cdc, kafka, "Асинхронная публикация событий")
+Rel_D(driver_svc, kafka, "Pub High-Volume Telemetry")
+
+Rel_R(kafka, s3_datalake, "Kafka-S3 Sink (Хронологический Дамп истории)")
+Rel_L(kafka, flink, "Consume Stream (Сырые сыбытия)")
+Rel_U(flink, kafka, "Produce Stream (Коэффициент Surge)")
+
+Rel_U(s3_datalake, spark, "Batch Read (Тяжелые агрегации истории)")
+Rel_D(spark, great_expectations, "Запуск тестов Data Quality перед вставкой (Circuit Breaker)")
+Rel_U(spark, clickhouse, "ETL / Загрузка в очищенные витрины (Load)")
+
+Rel_D(s3_datalake, ml_platform, "Вычитка датасетов для обучения моделей")
+Rel_U(ml_platform, model_serving, "Деплой обученных артефактов моделей (Deploy)")
+Rel_U(model_serving, operational, "Запрос к ML / Fraud Check Request (Inference)", "gRPC / REST")
+
+Rel_D(clickhouse, superset, "Сверх-быстрые аналитические выборки (OLAP Read)")
+
+@enduml
