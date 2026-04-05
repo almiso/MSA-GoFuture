@@ -1,0 +1,67 @@
+@startuml GLOBAL_C2_Security
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+' Определяем красный цвет (Security & Failover changes) согласно требованию задания
+AddElementTag("security", $bgColor="#FFEBEB", $fontColor="#CC0000", $borderColor="#CC0000")
+AddRelTag("red_arrow", $textColor="#CC0000", $lineColor="#CC0000")
+
+title Диаграмма контейнеров (C2) - Geo-Routing, Failover и Perimeter Security
+
+Person(passenger, "Пассажиры", "iOS/Android из Азии и Ю.Америки")
+Person(driver, "Водители", "iOS/Android")
+
+System_Boundary(global_edge, "Global Edge Network (Точки маршрутизации)") {
+    Container(route53, "Global DNS & Geo-Routing", "AWS Route 53 / Global App Accelerator", "Latency-based routing. Anycast перенаправляет трафик в ближайший узел", $tags="security")
+    Container(shield, "Network Firewall / Anti-DDoS", "L3/L4 Firewall", "Защита сетевого уровня от SYN-флуда, UDP-отражений (DDoS) и очистка плохих пакетов", $tags="security")
+    Container(waf, "Web Application Firewall (WAF)", "AWS WAF / Cloudflare", "L7 защита REST API от SQL-инъекций, XSS, защита от ботов (Rate Limiting)", $tags="security")
+}
+
+System_Boundary(region_sa, "sa-east-1 (Сан-Паулу) - ACTIVE") {
+    Container(api_gw_sa, "API Gateway / Ingress", "Nginx", "Локальная маршрутизация (Strangler Fig)")
+    Container(booking_sa, "GoFuture App Services", "Go / Python", "Локальная обработка поездок")
+    ContainerDb(db_sa, "Local Trips DB", "PostgreSQL", "Локализованные поездки (Compliance: LGPD Бразилия)")
+}
+
+System_Boundary(region_jak, "ap-southeast-3 (Джакарта) - ACTIVE") {
+    Container(api_gw_jak, "API Gateway / Ingress", "Nginx", "Локальная маршрутизация")
+    Container(booking_jak, "GoFuture App Services", "Go / Python", "Локальная обработка поездок")
+}
+
+System_Boundary(region_sin, "ap-southeast-1 (Сингапур) - STANDBY / ACTIVE") {
+    Container(api_gw_sin, "API Gateway / Ingress", "Nginx", "Обслуживает Сингапур, выступает резервом для Джакарты")
+    Container(booking_sin, "GoFuture App Services", "Go / Python", "Обработка")
+}
+
+System_Boundary(region_eu, "Global Core (Франкфурт)") {
+    ContainerDb(global_db, "Global User Profiles", "Aurora Global / CockroachDB", "Асинхронная межрегиональная репликация профилей (<1s задержка)")
+    Container(analytics_eu, "Global Analytics", "ClickHouse", "Аналитика на деперсонализированных токенах")
+}
+
+' Users to Edge
+Rel_D(passenger, route53, "HTTPS (По Anycast IP)")
+Rel_D(driver, route53, "HTTPS (По Anycast IP)")
+
+' Inside Edge
+Rel_D(route53, shield, "Неочищенный трафик", $tags="red_arrow")
+Rel_D(shield, waf, "L4 Очищенный трафик", $tags="red_arrow")
+
+' Edge to Regions (Normal Routing)
+Rel_D(waf, api_gw_sa, "Трафик из Юж. Америки (Норма)", "HTTPS")
+Rel_D(waf, api_gw_jak, "Трафик из Индонезии (Норма)", "HTTPS")
+Rel_D(waf, api_gw_sin, "Трафик из Сингапура (Норма)", "HTTPS")
+
+' Failover Route (Red Highlight)
+Rel_D(waf, api_gw_sin, "FAILOVER трафик", "HTTPS. При полном падении Джакарты трафик уходит сюда", $tags="red_arrow")
+
+' Inner processing
+Rel_D(api_gw_sa, booking_sa, "HTTP")
+Rel_D(booking_sa, db_sa, "SQL")
+
+Rel_D(api_gw_jak, booking_jak, "HTTP")
+Rel_D(api_gw_sin, booking_sin, "HTTP")
+
+' Data Replication
+Rel_R(booking_sa, global_db, "Чтение профиля (Из локальной read-реплики)", "SQL")
+Rel_U(booking_sa, analytics_eu, "Токенизированные события по Kafka MirrorMaker", "TCP")
+
+@enduml
