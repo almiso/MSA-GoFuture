@@ -1,0 +1,68 @@
+@startuml EVENT_C2
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Диаграмма событийной архитектуры (Event-Driven C2)
+
+System_Boundary(core_services, "Core Microservices (Producers & Saga)") {
+    Container(booking_svc, "Booking Service", "Go", "Saga Orchestrator")
+    ContainerDb(booking_db, "Booking DB\n(+ Outbox Table)", "PostgreSQL")
+    
+    Container(driver_svc, "Driver Service", "Go", "Исполнитель саги, Publisher телеметрии")
+    ContainerDb(driver_db, "Driver DB\n(+ Outbox Table)", "PostgreSQL")
+
+    Container(payments_svc, "Payments Service", "Go", "Исполнитель саги")
+}
+
+System_Boundary(event_platform, "Event Platform Infrastructure") {
+    Container(cdc_debezium, "Debezium Connect", "Kafka Connect", "Извлечение Outbox записей из WAL и атомарная отправка в топики")
+
+    ContainerQueue(kafka_cluster, "Apache Kafka", "Message Broker", "Хронологическое хранение событий, партиционирование (ride_id, region_id)")
+    Container(schema_registry, "Schema Registry", "Confluent", "Контроль контрактов (Protobuf/Avro) против Poison Pills")
+
+    System_Boundary(stream_processing, "Stream Processing Cluster") {
+        Container(flink_jobs, "Apache Flink", "Stateful Streaming", "Агрегация временных окон, расчет Surge-коэффициентов, аналитика в реальном времени")
+    }
+}
+
+System_Boundary(analytics_domain, "Downstream Consumers") {
+    Container(analytics_svc, "Analytics Service", "Python", "Батч-загрузка и ML-пайплайны")
+    Container(pricing_svc, "Pricing Service", "Go", "Применение полученного Surge-тарифа")
+    Container(notification_svc, "Notification Service", "Go", "Отправка Push-уведомлений")
+}
+
+System_Boundary(observability, "Observability & Monitoring Stack") {
+    Container(prometheus, "Prometheus", "Metrics TSDB", "Сбор из пулов метрик (Pull) показателей Consumer Lag, Throughput")
+    Container(grafana, "Grafana", "Dashboards & Alerts", "Визуализация, Alertmanager")
+    Container(jaeger, "Jaeger / Tempo", "Distributed Tracing", "Коллектор сквозных трейсов (OpenTelemetry API)")
+}
+
+' Outbox Pattern connections
+Rel_L(booking_svc, booking_db, "1. Транзакция (Бизнес + Outbox)", "SQL")
+Rel_R(driver_svc, driver_db, "1. Транзакция (Бизнес + Outbox)", "SQL")
+Rel_D(booking_db, cdc_debezium, "2. CDC (WAL stream)", "PostgreSQL")
+Rel_D(driver_db, cdc_debezium, "2. CDC (WAL stream)", "PostgreSQL")
+Rel_D(cdc_debezium, kafka_cluster, "3. Публикация бизнес-событий (At-Least-Once)", "TCP")
+
+' Normal Pub/Sub connections
+Rel_L(kafka_cluster, schema_registry, "Валидация схем", "HTTPS")
+Rel(booking_svc, kafka_cluster, "Sub Saga Reply", "TCP")
+Rel(driver_svc, kafka_cluster, "Pub/Sub Saga", "TCP")
+Rel(payments_svc, kafka_cluster, "Pub/Sub Saga Events", "TCP")
+
+' Stream Processing
+Rel_R(kafka_cluster, flink_jobs, "Consume (driver.telemetry, booking.requested)", "TCP")
+Rel_L(flink_jobs, kafka_cluster, "Produce (pricing.surge)", "TCP")
+
+' Consumers
+Rel_D(kafka_cluster, pricing_svc, "Sub (pricing.surge)", "TCP")
+Rel_D(kafka_cluster, notification_svc, "Sub (booking.ride.accepted)", "TCP")
+Rel_D(kafka_cluster, analytics_svc, "Sub (Все бизнес-события)", "TCP")
+
+' Monitoring Connections
+Rel_D(grafana, prometheus, "Отображение графиков", "HTTPS")
+Rel_U(kafka_cluster, prometheus, "JMX Метрики (Consumer Lag, URP)")
+Rel_U(flink_jobs, prometheus, "Метрики окон и задержек")
+Rel_U(core_services, prometheus, "Service Metrics (Throughput, Errors)")
+Rel_U(core_services, jaeger, "Пуш трейсов (Spans / trace_id)", "gRPC")
+
+@enduml
