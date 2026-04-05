@@ -1,0 +1,57 @@
+@startuml MULTITENANT_C2
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title C2 Диаграмма: Мультитенантность, IAM, Мониторинг и процесс Onboarding
+
+Person(global_admin, "Global Admin", "Сотрудник B2B-отдела платформы GoFuture")
+Person(tenant_admin, "Tenant Admin", "Владелец таксопарка (White-label Партнёр)")
+System_Ext(corp_sso, "Corporate SSO", "Active Directory (SAML/Консолидация партнера)")
+
+System_Boundary(auth_layer, "Identity & Access Management (IAM)") {
+    Container(api_gateway, "API Gateway / Ingress", "Kong / Nginx", "Блокировка неавторизованных, валидация JWT подписи (JWKS), Rate Limiting (Quotas) по tenant_id")
+    Container(keycloak, "Keycloak Server", "Java", "Полноценный IAM провайдер. Аутентификация, выпуск JWT с roles и tenant_id. Поддержка федерации пользователей")
+    ContainerDb(iam_db, "IAM Database", "PostgreSQL", "Хранение пользователей, политик и изолированных реалмов (Realms)")
+}
+
+System_Boundary(tenant_mgmt, "B2B Платформа (Onboarding & Billing)") {
+    Container(tenant_svc, "Tenant Mgmt Service", "Go", "Бизнес-логока добавления партнеров, генерация уникальных tenant_id, биллинг")
+    Container(provisioning_worker, "DB Provisioning Worker", "Python", "Слушает события, автоматически разворачивает схемы и кастомные миграции в БД")
+    ContainerQueue(kafka_admin, "Admin Event Bus", "Kafka", "Шина административных системных событий (TenantCreated)")
+}
+
+System_Boundary(operational, "Слой Транзакций (Operational Microservices)") {
+    Container(booking_svc, "Booking Service", "Go", "Приложение микросервиса (Один инстанс на всех)")
+    ContainerDb(booking_db, "Booking DB (Bridge Isolation)", "PostgreSQL", "Изолированные схемы: schema_partnerA, schema_partnerB. Логическая изоляция на уровне RDBMS")
+}
+
+System_Boundary(observability, "Multi-Tenant Observability & Monitoring") {
+    Container(prometheus, "Prometheus", "Metrics TSDB", "Таймсерии производительности, жестко промаркированные Labels: 'tenant_id'")
+    Container(grafana, "Grafana", "Dashboards", "Сводные и клиентские графики (с изоляцией видимости SLA партнера)")
+    Container(jaeger, "Jaeger", "Tracing", "Распределенные трейсы замаркированы тегом tenant_id")
+}
+
+' IAM Flow
+Rel_D(tenant_admin, api_gateway, "REST API (Запросы к платформе)")
+Rel_D(global_admin, api_gateway, "Управление B2B")
+Rel(tenant_admin, keycloak, "Логин (SSO / Веб-форма аутентификации)")
+Rel_R(keycloak, corp_sso, "Федерация / Импорт пользователей (Опционально)")
+Rel_D(keycloak, iam_db, "Управление стейтом аутентификации")
+Rel_L(api_gateway, keycloak, "Валидация (JWKS Edge Check)")
+
+' Onboarding Flow (Partner Connection Logic)
+Rel_D(global_admin, tenant_svc, "1. POST /api/tenants (Регистрация партнера Франчайзи)")
+Rel_R(tenant_svc, keycloak, "2. Авто-настройка изолированного Realm и роли Tenant Admin", "REST API")
+Rel_D(tenant_svc, kafka_admin, "3. Publish: platform.tenant.created.v1 (tenant_id, region_code)")
+Rel_D(kafka_admin, provisioning_worker, "4. Consume Onboarding Task")
+Rel_D(provisioning_worker, booking_db, "5. Накат SQL Schema миграций: CREATE SCHEMA tenant_x", "Flyway / SQL")
+
+' Regular Multi-Tenant Interaction Flow
+Rel_D(api_gateway, booking_svc, "Проброс авторизованного запроса (Header X-Tenant-ID из JWT)")
+Rel_R(booking_svc, booking_db, "Обеспечение изоляции: SET search_path = tenant_x до выполнения транзакции", "SQL")
+
+' Monitoring
+Rel_D(api_gateway, prometheus, "Сбор метрик ошибок (RPS/500/Lag) разбитых по tenant_id")
+Rel_D(booking_svc, jaeger, "Публикация спанов с тегом tenant_X для разбора инцидентов у конкретного таксопарка")
+Rel_L(grafana, prometheus, "Чтение метрик для биллинга SLA")
+
+@enduml
